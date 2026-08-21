@@ -1,0 +1,4 @@
+streamlit==1.38.0
+supabase==2.7.4
+pypdf==4.3.1
+requests==2.32.3

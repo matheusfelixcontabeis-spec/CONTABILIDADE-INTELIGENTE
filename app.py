@@ -28,14 +28,41 @@ except Exception as e:
     supabase_error = str(e)
 
 # =========================================================
+# CONTAS PADRÃO POR TIPO DE DOCUMENTO
+# (usadas quando a IA/regras não especificam conta própria)
+# =========================================================
+CONTAS_PADRAO = {
+    "Nota Fiscal": ("Clientes a Receber", "Receita de Vendas ou Serviços"),
+    "Boleto/Fatura": ("Despesas Operacionais", "Fornecedores a Pagar"),
+    "Extrato Bancário": ("Caixa/Bancos", "Diversos (conciliar)"),
+    "Documento não identificado": ("A classificar", "A classificar"),
+}
+
+
+def _extrair_valor(texto: str) -> float:
+    """Extrai o maior valor em R$ encontrado no texto (heurística: maior valor
+    costuma ser o valor total do documento)."""
+    candidatos = []
+    for m in re.finditer(r"r\$\s*([\d\.]+,\d{2}|\d+,\d{2})", texto.lower()):
+        bruto = m.group(1).replace(".", "").replace(",", ".")
+        try:
+            candidatos.append(float(bruto))
+        except ValueError:
+            continue
+    return max(candidatos) if candidatos else 0.0
+
+
+# =========================================================
 # MÓDULO: CLASSIFICADOR DE DOCUMENTOS (IA)
 # =========================================================
 def classify_document(texto: str, groq_api_key: str = None) -> dict:
     """
     Classifica um documento contábil (nota fiscal, boleto, extrato, etc.)
     Usa a API da Groq se a chave estiver disponível; senão, usa regras simples (fallback).
+    Sempre retorna um valor numérico ('valor') e contas de débito/crédito.
     """
     texto_lower = texto.lower()
+    valor_extraido = _extrair_valor(texto)
 
     # Tenta usar IA via Groq, se a chave existir
     if groq_api_key:
@@ -44,7 +71,7 @@ def classify_document(texto: str, groq_api_key: str = None) -> dict:
             client = Groq(api_key=groq_api_key)
 
             prompt = f"""Você é um assistente contábil. Analise o documento abaixo e responda em formato JSON com as chaves:
-tipo_documento, classificacao_fiscal, confianca (Alta/Média/Baixa), lancamento_sugerido.
+tipo_documento, classificacao_fiscal, confianca (Alta/Média/Baixa), lancamento_sugerido, conta_debito, conta_credito, valor (numero, sem "R$", use ponto decimal).
 
 Documento:
 {texto[:3000]}
@@ -63,6 +90,13 @@ Responda APENAS o JSON, sem explicações."""
             if match:
                 dados = json.loads(match.group())
                 dados["fonte"] = "IA (Groq/Llama 3.3)"
+                # garante numérico válido; se a IA não trouxer valor, usa o extraído por regex
+                try:
+                    dados["valor"] = float(dados.get("valor") or 0) or valor_extraido
+                except (TypeError, ValueError):
+                    dados["valor"] = valor_extraido
+                dados.setdefault("conta_debito", "A classificar")
+                dados.setdefault("conta_credito", "A classificar")
                 return dados
         except Exception as e:
             st.warning(f"Falha ao usar IA ({e}). Usando classificação por regras.")
@@ -71,28 +105,28 @@ Responda APENAS o JSON, sem explicações."""
     if "nota fiscal" in texto_lower or "nfe" in texto_lower or "nfs-e" in texto_lower:
         tipo = "Nota Fiscal"
         classificacao = "Receita de Serviço" if "serviço" in texto_lower else "Receita de Venda"
-        lancamento = "Débito: Clientes a Receber / Crédito: Receita de Vendas ou Serviços"
     elif "boleto" in texto_lower or "fatura" in texto_lower:
         tipo = "Boleto/Fatura"
         classificacao = "Despesa Operacional"
-        lancamento = "Débito: Despesas Operacionais / Crédito: Fornecedores a Pagar"
     elif "extrato" in texto_lower or "saldo" in texto_lower:
         tipo = "Extrato Bancário"
         classificacao = "Movimentação Financeira"
-        lancamento = "Conforme lançamentos detalhados do extrato"
     else:
         tipo = "Documento não identificado"
         classificacao = "Revisão manual necessária"
-        lancamento = "A definir pelo contador"
 
-    valor_match = re.search(r"r\$\s*([\d.,]+)", texto_lower)
-    valor_texto = f" (valor identificado: R$ {valor_match.group(1)})" if valor_match else ""
+    conta_debito, conta_credito = CONTAS_PADRAO.get(tipo, ("A classificar", "A classificar"))
+    lancamento = f"Débito: {conta_debito} / Crédito: {conta_credito}"
+    valor_texto = f" (valor identificado: R$ {valor_extraido:,.2f})" if valor_extraido else ""
 
     return {
         "tipo_documento": tipo,
         "classificacao_fiscal": classificacao,
-        "confianca": "Média" if valor_match else "Baixa",
+        "confianca": "Média" if valor_extraido else "Baixa",
         "lancamento_sugerido": lancamento + valor_texto,
+        "conta_debito": conta_debito,
+        "conta_credito": conta_credito,
+        "valor": valor_extraido,
         "fonte": "Regras (fallback, sem IA configurada)",
     }
 
@@ -267,7 +301,16 @@ with tab1:
             st.metric("Classificação fiscal sugerida", r["classificacao_fiscal"])
             st.write(f"**Confiança:** {r['confianca']}")
             st.write(f"**Lançamento contábil sugerido:** {r['lancamento_sugerido']}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Conta débito", r.get("conta_debito", "A classificar"))
+            c2.metric("Conta crédito", r.get("conta_credito", "A classificar"))
+            c3.metric("Valor identificado", f"R$ {r.get('valor', 0):,.2f}")
             st.write(f"**Fonte da análise:** {r['fonte']}")
+
+            valor_editado = st.number_input(
+                "Ajustar valor do lançamento (se a extração automática errou)",
+                min_value=0.0, value=float(r.get("valor", 0) or 0), step=0.01, format="%.2f",
+            )
 
             if st.button("📤 Enviar para conferência humana", use_container_width=True):
                 if supabase_ok:
@@ -279,6 +322,9 @@ with tab1:
                             "classificacao_fiscal": r["classificacao_fiscal"],
                             "lancamento_sugerido": r["lancamento_sugerido"],
                             "confianca": r["confianca"],
+                            "conta_debito": r.get("conta_debito", "A classificar"),
+                            "conta_credito": r.get("conta_credito", "A classificar"),
+                            "valor": valor_editado,
                             "status": "pendente",
                             "criado_em": datetime.utcnow().isoformat(),
                         }).execute()
@@ -315,6 +361,7 @@ with tab2:
                 with c2:
                     st.write(f"**Classificação:** {doc['classificacao_fiscal']}")
                     st.write(f"**Lançamento:** {doc['lancamento_sugerido']}")
+                    st.write(f"**Valor:** R$ {doc.get('valor', 0) or 0:,.2f}")
                 with c3:
                     if st.button("✅ Aprovar", key=f"apr_{doc['id']}"):
                         supabase.table("documentos").update({"status": "aprovado"}).eq("id", doc["id"]).execute()
@@ -345,11 +392,11 @@ with tab3:
         lancamentos = []
         for doc in docs_aprovados:
             lancamentos.append(gerar_lancamento(
-                valor=doc.get("valor", 0) or 0,
+                valor=doc.get("valor") or 0,
                 historico=f"{doc['tipo_documento']} - {doc['cliente_nome']}",
-                conta_debito="Despesas",
-                conta_credito="Caixa/Bancos",
-                data=doc.get("criado_em", "")[:10],
+                conta_debito=doc.get("conta_debito") or "A classificar",
+                conta_credito=doc.get("conta_credito") or "A classificar",
+                data=(doc.get("criado_em") or "")[:10],
             ))
 
         if lancamentos:
@@ -383,6 +430,13 @@ with tab3:
         if lancamentos:
             balancete = calcular_balancete(lancamentos)
             st.dataframe(balancete, use_container_width=True)
+
+            total_debito = sum(l["debito"] for l in balancete)
+            total_credito = sum(l["credito"] for l in balancete)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Débitos", f"R$ {total_debito:,.2f}")
+            c2.metric("Total Créditos", f"R$ {total_credito:,.2f}")
+            c3.metric("Diferença", f"R$ {total_debito - total_credito:,.2f}")
 
             if st.button("📄 Gerar PDF do balancete", use_container_width=True):
                 caminho = gerar_pdf_balancete(balancete, caminho="/tmp/balancete.pdf")

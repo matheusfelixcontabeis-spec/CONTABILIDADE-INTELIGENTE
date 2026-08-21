@@ -1,0 +1,449 @@
+"""
+Testes para o AgenteContador (Classificação Contábil Semântica).
+"""
+import pytest
+import pandas as pd
+from pathlib import Path
+from unittest.mock import patch, Mock
+from backend.agentes.contador import AgenteContador
+from backend.utilitarios.excecoes import ErroClassificacaoContabil
+
+
+class TestIngestaoPlanoContas:
+    """Testes para ingestão de Planos de Contas (CSV/Excel)."""
+    
+    # Subclasse para teste que isola componentes externos
+    class AgenteContadorTestable(AgenteContador):
+        def _configurar_embeddings(self):
+            return Mock()
+            
+    def test_ingestao_csv_sucesso(self, session_id_teste, plano_contas_arquivo_csv, 
+                                  mock_llm_engine, mock_chromadb_client):
+        """Testa ingestão bem sucedida de CSV."""
+        # Patch apenas do cliente Chroma, já que embeddings estão isolados na subclasse
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+            
+            assert resultado["sucesso"] is True
+            assert resultado["qtd_contas"] > 0
+    
+    def test_ingestao_excel_sucesso(self, session_id_teste, plano_contas_mock, 
+                                    mock_llm_engine, mock_chromadb_client, tmp_path):
+        """Testa ingestão bem sucedida de Excel."""
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            arquivo_excel = tmp_path / "plano_teste.xlsx"
+            plano_contas_mock.to_excel(arquivo_excel, index=False)
+            
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            resultado = agente.ingestar_plano_contas(str(arquivo_excel))
+            
+            assert resultado["sucesso"] is True
+            assert resultado["qtd_contas"] > 0
+    
+    def test_ingestao_arquivo_invalido(self, session_id_teste, mock_llm_engine, 
+                                       mock_chromadb_client, tmp_path):
+        """Testa erro ao tentar ingestar arquivo inexistente ou inválido."""
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            
+            resultado = agente.ingestar_plano_contas("arquivo_inexistente.csv")
+            assert resultado["sucesso"] is False
+            assert "erro" in resultado
+            
+            arquivo_txt = tmp_path / "arquivo.txt"
+            arquivo_txt.write_text("conteudo invalido")
+            resultado = agente.ingestar_plano_contas(str(arquivo_txt))
+            assert resultado["sucesso"] is False
+
+
+class TestClassificacaoContabil:
+    """Testes de classificação contábil semântica."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_energia(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                   mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com energia elétrica."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("PGTO ELETROPAULO", 150.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.01" in resultado["conta_codigo"]
+        assert resultado["score_semantico"] > 0
+        assert "ENERGIA" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_combustivel(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                       mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com combustível."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("POSTO SHELL GASOLINA", 200.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.02" in resultado["conta_codigo"]
+        assert "COMBUSTIVEIS" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_aluguel(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                   mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com aluguel."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("ALUGUEL ESCRITORIO", 3000.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.03" in resultado["conta_codigo"]
+        assert "ALUGUEL" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_com_ancoragem_fiscal(self, mock_chroma_class, session_id_teste, 
+                                                plano_contas_arquivo_csv, mock_llm_engine, 
+                                                mock_chromadb_client):
+        """Testa classificação com ancoragem fiscal (dados da NFe)."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        # Simula transação genérica no banco mas com descrição específica na NFe
+        dados_fiscais = {
+            "descricao_item": "GASOLINA ADITIVADA V-POWER"
+        }
+        
+        resultado = agente.classificar_transacao(
+            "DEBITO AUTOMATICO 123456",  # Descrição genérica
+            200.00,
+            dados_fiscais=dados_fiscais
+        )
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.02" in resultado["conta_codigo"]  # Deve classificar como combustível
+        assert "Ancoragem Fiscal" in resultado["origem"]
+    
+    def test_classificacao_plano_vazio(self, session_id_teste, mock_llm_engine):
+        """Testa comportamento quando plano de contas não foi ingestado."""
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        
+        # Tenta classificar sem ter ingestado plano
+        resultado = agente.classificar_transacao("PGTO TESTE", 100.00)
+        
+        assert resultado["sucesso"] is False
+        assert "9.9.9.99" in resultado["conta_codigo"]  # Conta transitória
+        assert resultado["score_semantico"] == 0.0
+
+
+class TestMultiplosProvedores:
+    """Testes com diferentes provedores de embeddings."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_provedor_openai(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                             mock_chromadb_client):
+        """Testa com provedor OpenAI (se chave disponível)."""
+        from config import Configuracao
+        
+        if not Configuracao.OPENAI_API_KEY:
+            pytest.skip("Chave OpenAI não configurada")
+        
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        class MockEngine:
+            provedor = "openai"
+            modelo = "gpt-4o-mini"
+            client = None
+        
+        agente = AgenteContador(session_id_teste, llm_engine=MockEngine())
+        resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        assert resultado["sucesso"] is True
+    
+    @patch('backend.agentes.contador.embedding_functions')
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_provedor_local_fallback(self, mock_chroma_class, mock_embedding_fns, session_id_teste, 
+                                     plano_contas_arquivo_csv, mock_chromadb_client):
+        """Testa fallback para provedor local (SentenceTransformer)."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        # Mock da função de embedding para evitar download de modelos
+        mock_embedding_fns.SentenceTransformerEmbeddingFunction.return_value = Mock()
+        
+        class MockEngine:
+            provedor = "local"
+            modelo = "all-MiniLM-L6-v2"
+            client = None
+        
+        agente = AgenteContador(session_id_teste, llm_engine=MockEngine())
+        resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        assert resultado["sucesso"] is True
+        mock_embedding_fns.SentenceTransformerEmbeddingFunction.assert_called_once()
+
+
+class TestConsistenciaClassificacao:
+    """Testes de consistência e qualidade das classificações."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_mesma_descricao_mesmo_resultado(self, mock_chroma_class, session_id_teste, 
+                                             plano_contas_arquivo_csv, mock_llm_engine,
+                                             mock_chromadb_client):
+        """Testa que a mesma descrição gera o mesmo resultado."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado1 = agente.classificar_transacao("PGTO ENERGIA ELETRICA", 150.00)
+        resultado2 = agente.classificar_transacao("PGTO ENERGIA ELETRICA", 150.00)
+        
+        assert resultado1["conta_codigo"] == resultado2["conta_codigo"]
+        assert resultado1["score_semantico"] == resultado2["score_semantico"]
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_score_alto_para_match_exato(self, mock_chroma_class, session_id_teste, 
+                                         plano_contas_arquivo_csv, mock_llm_engine,
+                                         mock_chromadb_client):
+        """Testa que match exato gera score alto."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        # Usa exatamente a descrição do plano de contas
+        resultado = agente.classificar_transacao("DESPESAS COM ENERGIA ELETRICA", 150.00)
+        
+        assert resultado["sucesso"] is True
+        assert resultado["score_semantico"] >= 90.0  # Score muito alto para match exato"""
+Testes para o AgenteContador (Classificação Contábil Semântica).
+"""
+import pytest
+import pandas as pd
+from pathlib import Path
+from unittest.mock import patch, Mock
+from backend.agentes.contador import AgenteContador
+from backend.utilitarios.excecoes import ErroClassificacaoContabil
+
+
+class TestIngestaoPlanoContas:
+    """Testes para ingestão de Planos de Contas (CSV/Excel)."""
+    
+    # Subclasse para teste que isola componentes externos
+    class AgenteContadorTestable(AgenteContador):
+        def _configurar_embeddings(self):
+            return Mock()
+            
+    def test_ingestao_csv_sucesso(self, session_id_teste, plano_contas_arquivo_csv, 
+                                  mock_llm_engine, mock_chromadb_client):
+        """Testa ingestão bem sucedida de CSV."""
+        # Patch apenas do cliente Chroma, já que embeddings estão isolados na subclasse
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+            
+            assert resultado["sucesso"] is True
+            assert resultado["qtd_contas"] > 0
+    
+    def test_ingestao_excel_sucesso(self, session_id_teste, plano_contas_mock, 
+                                    mock_llm_engine, mock_chromadb_client, tmp_path):
+        """Testa ingestão bem sucedida de Excel."""
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            arquivo_excel = tmp_path / "plano_teste.xlsx"
+            plano_contas_mock.to_excel(arquivo_excel, index=False)
+            
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            resultado = agente.ingestar_plano_contas(str(arquivo_excel))
+            
+            assert resultado["sucesso"] is True
+            assert resultado["qtd_contas"] > 0
+    
+    def test_ingestao_arquivo_invalido(self, session_id_teste, mock_llm_engine, 
+                                       mock_chromadb_client, tmp_path):
+        """Testa erro ao tentar ingestar arquivo inexistente ou inválido."""
+        with patch('backend.agentes.contador.chromadb.PersistentClient', return_value=mock_chromadb_client):
+            agente = self.AgenteContadorTestable(session_id_teste, llm_engine=mock_llm_engine)
+            
+            resultado = agente.ingestar_plano_contas("arquivo_inexistente.csv")
+            assert resultado["sucesso"] is False
+            assert "erro" in resultado
+            
+            arquivo_txt = tmp_path / "arquivo.txt"
+            arquivo_txt.write_text("conteudo invalido")
+            resultado = agente.ingestar_plano_contas(str(arquivo_txt))
+            assert resultado["sucesso"] is False
+
+
+class TestClassificacaoContabil:
+    """Testes de classificação contábil semântica."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_energia(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                   mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com energia elétrica."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("PGTO ELETROPAULO", 150.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.01" in resultado["conta_codigo"]
+        assert resultado["score_semantico"] > 0
+        assert "ENERGIA" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_combustivel(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                       mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com combustível."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("POSTO SHELL GASOLINA", 200.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.02" in resultado["conta_codigo"]
+        assert "COMBUSTIVEIS" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_aluguel(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                                   mock_llm_engine, mock_chromadb_client):
+        """Testa classificação de despesa com aluguel."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado = agente.classificar_transacao("ALUGUEL ESCRITORIO", 3000.00)
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.03" in resultado["conta_codigo"]
+        assert "ALUGUEL" in resultado["conta_descricao"].upper()
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_classificacao_com_ancoragem_fiscal(self, mock_chroma_class, session_id_teste, 
+                                                plano_contas_arquivo_csv, mock_llm_engine, 
+                                                mock_chromadb_client):
+        """Testa classificação com ancoragem fiscal (dados da NFe)."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        # Simula transação genérica no banco mas com descrição específica na NFe
+        dados_fiscais = {
+            "descricao_item": "GASOLINA ADITIVADA V-POWER"
+        }
+        
+        resultado = agente.classificar_transacao(
+            "DEBITO AUTOMATICO 123456",  # Descrição genérica
+            200.00,
+            dados_fiscais=dados_fiscais
+        )
+        
+        assert resultado["sucesso"] is True
+        assert "3.1.02" in resultado["conta_codigo"]  # Deve classificar como combustível
+        assert "Ancoragem Fiscal" in resultado["origem"]
+    
+    def test_classificacao_plano_vazio(self, session_id_teste, mock_llm_engine):
+        """Testa comportamento quando plano de contas não foi ingestado."""
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        
+        # Tenta classificar sem ter ingestado plano
+        resultado = agente.classificar_transacao("PGTO TESTE", 100.00)
+        
+        assert resultado["sucesso"] is False
+        assert "9.9.9.99" in resultado["conta_codigo"]  # Conta transitória
+        assert resultado["score_semantico"] == 0.0
+
+
+class TestMultiplosProvedores:
+    """Testes com diferentes provedores de embeddings."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_provedor_openai(self, mock_chroma_class, session_id_teste, plano_contas_arquivo_csv, 
+                             mock_chromadb_client):
+        """Testa com provedor OpenAI (se chave disponível)."""
+        from config import Configuracao
+        
+        if not Configuracao.OPENAI_API_KEY:
+            pytest.skip("Chave OpenAI não configurada")
+        
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        class MockEngine:
+            provedor = "openai"
+            modelo = "gpt-4o-mini"
+            client = None
+        
+        agente = AgenteContador(session_id_teste, llm_engine=MockEngine())
+        resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        assert resultado["sucesso"] is True
+    
+    @patch('backend.agentes.contador.embedding_functions')
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_provedor_local_fallback(self, mock_chroma_class, mock_embedding_fns, session_id_teste, 
+                                     plano_contas_arquivo_csv, mock_chromadb_client):
+        """Testa fallback para provedor local (SentenceTransformer)."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        # Mock da função de embedding para evitar download de modelos
+        mock_embedding_fns.SentenceTransformerEmbeddingFunction.return_value = Mock()
+        
+        class MockEngine:
+            provedor = "local"
+            modelo = "all-MiniLM-L6-v2"
+            client = None
+        
+        agente = AgenteContador(session_id_teste, llm_engine=MockEngine())
+        resultado = agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        assert resultado["sucesso"] is True
+        mock_embedding_fns.SentenceTransformerEmbeddingFunction.assert_called_once()
+
+
+class TestConsistenciaClassificacao:
+    """Testes de consistência e qualidade das classificações."""
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_mesma_descricao_mesmo_resultado(self, mock_chroma_class, session_id_teste, 
+                                             plano_contas_arquivo_csv, mock_llm_engine,
+                                             mock_chromadb_client):
+        """Testa que a mesma descrição gera o mesmo resultado."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        resultado1 = agente.classificar_transacao("PGTO ENERGIA ELETRICA", 150.00)
+        resultado2 = agente.classificar_transacao("PGTO ENERGIA ELETRICA", 150.00)
+        
+        assert resultado1["conta_codigo"] == resultado2["conta_codigo"]
+        assert resultado1["score_semantico"] == resultado2["score_semantico"]
+    
+    @patch('backend.agentes.contador.chromadb.PersistentClient')
+    def test_score_alto_para_match_exato(self, mock_chroma_class, session_id_teste, 
+                                         plano_contas_arquivo_csv, mock_llm_engine,
+                                         mock_chromadb_client):
+        """Testa que match exato gera score alto."""
+        mock_chroma_class.return_value = mock_chromadb_client
+        
+        agente = AgenteContador(session_id_teste, llm_engine=mock_llm_engine)
+        agente.ingestar_plano_contas(plano_contas_arquivo_csv)
+        
+        # Usa exatamente a descrição do plano de contas
+        resultado = agente.classificar_transacao("DESPESAS COM ENERGIA ELETRICA", 150.00)
+        
+        assert resultado["sucesso"] is True
+        assert resultado["score_semantico"] >= 90.0  # Score muito alto para match exato

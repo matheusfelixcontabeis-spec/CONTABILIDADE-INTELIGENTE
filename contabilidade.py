@@ -1,36 +1,66 @@
-# 1. Função de conciliação: compara valores do extrato com lançamentos já lançados
-def conciliar_extrato(lancamentos_extrato, lancamentos_contabeis):
-    # match por valor + data + histórico
-    ...
+from fpdf import FPDF
+
+# 1. Conciliação de extrato bancário
+def conciliar_extrato(extrato, lancamentos):
+    """Compara extrato bancário com lançamentos internos."""
+    conciliados = []
+    pendentes = []
+    for mov in extrato:
+        match = next(
+            (l for l in lancamentos if l["valor"] == mov["valor"] and l["data"] == mov["data"]),
+            None
+        )
+        if match:
+            conciliados.append({"extrato": mov, "lancamento": match})
+        else:
+            pendentes.append(mov)
+    return conciliados, pendentes
+
 
 # 2. Gerar lançamento contábil (partida dobrada)
 def gerar_lancamento(valor, historico, conta_debito, conta_credito, data):
-    ...
+    return {
+        "data": data,
+        "historico": historico,
+        "valor": valor,
+        "debito": conta_debito,
+        "credito": conta_credito,
+    }
+
 
 # 3. Calcular balancete (saldo por conta)
 def calcular_balancete(lancamentos):
-    # agrupa por conta: débitos, créditos, saldo
-    ...
+    contas = {}
+    for lanc in lancamentos:
+        deb = lanc["debito"]
+        cred = lanc["credito"]
+        valor = lanc["valor"]
 
-# 4. Exportar PDF (usando fpdf2 ou reportlab)
-from fpdf import FPDF
+        contas.setdefault(deb, {"nome": deb, "debito": 0, "credito": 0})
+        contas.setdefault(cred, {"nome": cred, "debito": 0, "credito": 0})
 
-def gerar_pdf_balancete(balancete):
+        contas[deb]["debito"] += valor
+        contas[cred]["credito"] += valor
+
+    balancete = []
+    for conta in contas.values():
+        conta["saldo"] = conta["debito"] - conta["credito"]
+        balancete.append(conta)
+
+    return balancete
+
+
+# 4. Exportar PDF do balancete
+def gerar_pdf_balancete(balancete, caminho="balancete.pdf"):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, "Balancete de Verificação", ln=True, align="C")
+    pdf.cell(200, 10, "Balancete de Verificacao", ln=True, align="C")
+    pdf.ln(5)
+
     for conta in balancete:
-        pdf.cell(0, 10, f"{conta['nome']} | Débito: {conta['debito']} | Crédito: {conta['credito']} | Saldo: {conta['saldo']}", ln=True)
-    pdf.output("balancete.pdf")
-    def conciliar_extrato...
-    # match por va...
-    ...
+        linha = f"{conta['nome']} | Debito: {conta['debito']:.2f} | Credito: {conta['credito']:.2f} | Saldo: {conta['saldo']:.2f}"
+        pdf.cell(0, 10, linha, ln=True)
 
-def gerar_lancament...
-    ...
-
-def calcular_balanc...
-    # agrupa por c...
-    ...
-
+    pdf.output(caminho)
+    return caminho

@@ -1,0 +1,25 @@
+# 1. Função de conciliação: compara valores do extrato com lançamentos já lançados
+def conciliar_extrato(lancamentos_extrato, lancamentos_contabeis):
+    # match por valor + data + histórico
+    ...
+
+# 2. Gerar lançamento contábil (partida dobrada)
+def gerar_lancamento(valor, historico, conta_debito, conta_credito, data):
+    ...
+
+# 3. Calcular balancete (saldo por conta)
+def calcular_balancete(lancamentos):
+    # agrupa por conta: débitos, créditos, saldo
+    ...
+
+# 4. Exportar PDF (usando fpdf2 ou reportlab)
+from fpdf import FPDF
+
+def gerar_pdf_balancete(balancete):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, "Balancete de Verificação", ln=True, align="C")
+    for conta in balancete:
+        pdf.cell(0, 10, f"{conta['nome']} | Débito: {conta['debito']} | Crédito: {conta['credito']} | Saldo: {conta['saldo']}", ln=True)
+    pdf.output("balancete.pdf")

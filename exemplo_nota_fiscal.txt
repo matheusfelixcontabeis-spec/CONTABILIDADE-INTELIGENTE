@@ -1,0 +1,8 @@
+NOTA FISCAL DE SERVIÇO Nº 1234
+Prestador: Padaria Bela Vista MEI - CNPJ 12.345.678/0001-90
+Tomador: João da Silva
+Descrição: Fornecimento de bolos e salgados para evento
+Valor total: R$ 1.500,00
+ISS retido: Não
+Data de emissão: 15/03/2026
+Regime tributário do prestador: Simples Nacional

@@ -1,61 +1,68 @@
-# Contadoros AI — MVP (deploy 100% pelo navegador, sem instalar nada)
+# Orquestrador Contadoros AI
 
-Tempo estimado: 20–30 minutos. Tudo é feito em sites, pelo navegador do seu PC de 4GB.
+Executa o fluxo completo automaticamente: você envia o texto de um documento,
+o sistema decide sozinho quais setores acionar, roda os sub-agentes em
+paralelo, consolida o resultado — e para em um único ponto: a aprovação
+humana antes de qualquer coisa virar contabilização final.
 
-## 1. Crie uma conta no GitHub (se não tiver) — grátis
-https://github.com/signup
+## O que É automático
+- Roteamento (Agente Sênior decide os setores, sem você escolher).
+- Execução de todos os sub-agentes acionados, em paralelo.
+- Consolidação e detecção de conflitos entre setores.
+- Priorização automática (score baixo ou conflito → "Prioritaria").
 
-## 2. Suba estes arquivos para um repositório novo
-- No github.com, clique em "New repository" → nome: `contadoros-ai-mvp` → Create.
-- Clique em "uploading an existing file" e arraste os 4 arquivos: `app.py`, `classifier.py`, `requirements.txt`, `README.md`.
-- Commit.
+## O único ponto manual (por design)
+O resultado final sai com `"status": "pendente_aprovacao_humana"`. Nada é
+lançado, contabilizado ou enviado a um órgão sozinho. Isso é proposital: em
+fiscal, tributário e DP um erro sem revisão vira multa ou pagamento errado
+pro cliente. Se você quiser remover esse freio mais adiante, é uma linha de
+código pra tirar (`status` no fim de `processar_documento`) — mas eu
+recomendo manter pelo menos até o produto ter mais tração validada.
 
-## 3. Ajuste a tabela `documentos` no Supabase
-Vá no seu projeto Supabase → SQL Editor → cole e rode:
+## Como rodar
 
-```sql
-alter table documentos
-  add column if not exists cliente_nome text,
-  add column if not exists texto_original text,
-  add column if not exists tipo_documento text,
-  add column if not exists classificacao_fiscal text,
-  add column if not exists lancamento_sugerido text,
-  add column if not exists confianca text,
-  add column if not exists status text default 'pendente',
-  add column if not exists criado_em timestamptz default now();
+1. Instale a dependência (é só uma):
+   ```
+   pip install -r requirements.txt --break-system-packages
+   ```
+   (Sem o `--break-system-packages` se você estiver usando um virtualenv.)
+
+2. Configure sua chave da API da Anthropic como variável de ambiente:
+   ```
+   export ANTHROPIC_API_KEY="sua-chave-aqui"
+   ```
+   (No Windows/PowerShell: `$env:ANTHROPIC_API_KEY="sua-chave-aqui"`)
+
+   Pegue a chave em https://console.anthropic.com/settings/keys — tem um
+   nível gratuito de créditos pra teste, depois é pré-pago por uso (bem
+   barato para volume de MVP: um documento típico custa frações de centavo).
+
+3. Rode com um documento de teste:
+   ```
+   python orquestrador.py exemplo_nota_fiscal.txt "Padaria Bela Vista MEI"
+   ```
+
+4. O resultado sai no terminal em JSON, pronto pra você (ou o próximo passo
+   de integração) jogar numa fila/banco de dados.
+
+## Estrutura de pastas
+```
+orquestrador/
+  orquestrador.py          <- o motor: roteia, executa, consolida
+  requirements.txt
+  prompts/
+    senior_roteamento.txt      <- decide quais setores acionar
+    senior_consolidacao.txt    <- junta as respostas, aponta conflitos
+    sub_contabil.txt
+    sub_fiscal.txt
+    sub_departamento_pessoal.txt
+    sub_tributario.txt
+    sub_legalizacao.txt
 ```
 
-Isso só adiciona colunas que faltarem — não apaga nada que já existe.
-
-Depois, vá em Project Settings → API e copie:
-- `Project URL` → isso é o `SUPABASE_URL`
-- `anon public key` → isso é o `SUPABASE_KEY`
-
-## 4. Pegue uma chave grátis da Groq (opcional, mas dá o efeito "IA de verdade")
-- https://console.groq.com → crie conta grátis (sem cartão) → API Keys → Create Key.
-- Sem essa chave o app ainda funciona, só que classifica por regras em vez de LLM — funciona bem pra demo também.
-
-## 5. Deploy no Streamlit Community Cloud — grátis
-- https://share.streamlit.io → login com GitHub.
-- "New app" → escolha o repositório `contadoros-ai-mvp` → main file: `app.py` → Deploy.
-- Antes ou depois do deploy, vá em "Settings" → "Secrets" do app e cole:
-
-```toml
-SUPABASE_URL = "https://SEU-PROJETO.supabase.co"
-SUPABASE_KEY = "sua-anon-key-aqui"
-GROQ_API_KEY = "sua-groq-key-aqui"
-```
-
-- Salve. O app reinicia sozinho e já fica no ar, com uma URL pública tipo
-  `https://contadoros-ai-mvp.streamlit.app` — essa é a URL que você mostra pro investidor.
-
-## O que mostrar na demo (roteiro sugerido)
-1. Aba "Novo Documento": cole o texto de uma nota fiscal de verdade (ou um extrato).
-2. Clique "Classificar com IA" → mostra tipo de documento, classificação fiscal e o lançamento contábil sugerido.
-3. Clique "Enviar para conferência humana".
-4. Vá na aba "Fila de Conferência" → mostre o botão Aprovar → isso é o pitch: **IA acelera, contador sempre valida antes de virar contabilização oficial**. É o seu diferencial de confiança frente a automações "caixa-preta".
-
-## Depois do investidor (não faça isso hoje)
-- Trocar upload de texto por OCR de imagem/PDF escaneado (tesseract).
-- Multiagentes por setor (Fiscal, DP, Tributário) — já desenhado, é a v2.
-- Autenticação multi-cliente (hoje o MVP é single-tenant, propositalmente).
+## Próximo passo natural
+Hoje você roda `python orquestrador.py arquivo.txt` na mão. Pra virar
+"documento entra, roda sozinho, sem terminal", falta só uma camada de
+entrada (ex: o mesmo Streamlit que já temos, ou uma pasta monitorada, ou um
+endpoint de e-mail) chamando a função `processar_documento()` — o motor em
+si já está pronto pra isso, não precisa ser reescrito.
